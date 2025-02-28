@@ -1,27 +1,36 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::{
-    convert::Infallible,
     env,
+    future::IntoFuture,
     process::Stdio,
     sync::OnceLock,
-    thread,
     time::{Duration, Instant},
 };
 
 use auto_launch::AutoLaunchBuilder;
-use futures_util::{SinkExt, Stream, StreamExt};
+use axum::{
+    extract::{
+        ws::{Message, WebSocket},
+        Request, WebSocketUpgrade,
+    },
+    response::{IntoResponse, Response},
+    routing::get,
+    Router,
+};
+use futures_util::{SinkExt, StreamExt};
+use reqwest::{Method, StatusCode, Url};
 use tao::event_loop::EventLoopBuilder;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     process::Command,
 };
+use tower_http::cors::CorsLayer;
 use tray_icon::{
     menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     TrayIconBuilder, TrayIconEvent,
 };
-use warp::{filters::ws::Message, reply::Response, Filter};
 
 async fn adb_start(path: &str) -> tokio::io::Result<()> {
     let mut command = Command::new(path);
@@ -131,7 +140,7 @@ fn start_browser() {
     open::that_detached("https://app.tangoapp.dev/?desktop=true").unwrap();
 }
 
-async fn handle_websocket(ws: warp::ws::WebSocket) {
+async fn handle_websocket(ws: WebSocket) {
     let (mut ws_writer, mut ws_reader) = ws.split();
 
     let (mut adb_reader, mut adb_writer) = adb_connect_or_start().await.unwrap().into_split();
@@ -139,8 +148,9 @@ async fn handle_websocket(ws: warp::ws::WebSocket) {
     tokio::join!(
         async {
             while let Some(Ok(message)) = ws_reader.next().await {
-                if message.is_binary() {
-                    adb_writer.write_all(message.as_bytes()).await.unwrap();
+                // Don't merge with `if` above to ignore other message types
+                if let Message::Binary(packet) = message {
+                    adb_writer.write_all(packet.as_ref()).await.unwrap();
                 }
             }
             adb_writer.shutdown().await.unwrap();
@@ -166,73 +176,52 @@ async fn handle_websocket(ws: warp::ws::WebSocket) {
 const ARG_AUTO_RUN: &str = "--auto-run";
 
 #[cfg(debug_assertions)]
-const PROXY_HOST: &str = "https://tunnel.tangoapp.dev";
+const PROXY_HOST: &str = "https://app.tangoapp.dev";
 #[cfg(not(debug_assertions))]
 const PROXY_HOST: &str = "https://app.tangoapp.dev";
 
 static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
-async fn proxy_request(
-    method: warp::http::Method,
-    tail: warp::path::Tail,
-    query: String,
-    body: impl Stream<Item = Result<impl warp::Buf, warp::Error>> + Send + Sync + 'static,
-) -> Result<Response, warp::Rejection> {
-    println!("proxy_request: {} {}", method, tail.as_str());
+#[axum::debug_handler]
+async fn proxy_request(request: Request) -> Response {
+    println!("proxy_request: {} {}", request.method(), request.uri());
 
-    let method = match method {
-        warp::http::Method::GET => reqwest::Method::GET,
-        warp::http::Method::POST => reqwest::Method::POST,
-        warp::http::Method::PUT => reqwest::Method::PUT,
-        warp::http::Method::DELETE => reqwest::Method::DELETE,
-        warp::http::Method::HEAD => reqwest::Method::HEAD,
-        warp::http::Method::OPTIONS => reqwest::Method::OPTIONS,
-        warp::http::Method::PATCH => reqwest::Method::PATCH,
-        warp::http::Method::TRACE => reqwest::Method::TRACE,
-        _ => return Err(warp::reject::not_found()),
-    };
+    let url = Url::options()
+        .base_url(Some(&Url::parse(PROXY_HOST).unwrap()))
+        .parse(&request.uri().to_string())
+        .unwrap();
 
-    let url = if query.is_empty() {
-        format!("{}/{}", PROXY_HOST, tail.as_str())
-    } else {
-        format!("{}/{}?{}", PROXY_HOST, tail.as_str(), query)
-    };
     let (client, request) = CLIENT
         .get_or_init(|| reqwest::Client::new())
-        .request(method, &url)
-        .body(reqwest::Body::wrap_stream(body.map(|result| {
-            result.map(|mut buf| {
-                let remaining = buf.remaining();
-                buf.copy_to_bytes(remaining)
-            })
-        })))
+        .request(request.method().clone(), url.clone())
+        .headers(request.headers().clone())
+        .body(reqwest::Body::wrap_stream(
+            request.into_body().into_data_stream(),
+        ))
         .build_split();
-    let request = request.map_err(|err| {
-        println!("build request error: {}", err);
-        warp::reject::not_found()
-    })?;
-    let response = client.execute(request).await.map_err(|err| {
-        println!("send request error: {}", err);
-        warp::reject::not_found()
-    })?;
 
-    Ok({
-        let builder = warp::hyper::Response::builder().status(response.status().as_u16());
-        let builder = response
-            .headers()
-            .iter()
-            .fold(builder, |builder, (key, value)| {
-                builder.header(key.as_str(), value.to_str().unwrap())
-            });
-        builder
-            .body(warp::hyper::Body::from(response.bytes().await.unwrap()))
-            .unwrap()
-    })
+    if let Ok(mut request) = request {
+        request
+            .headers_mut()
+            .insert("Host", url.host_str().unwrap().parse().unwrap());
+
+        if let Ok(response) = client.execute(request).await {
+            return (
+                response.status(),
+                response.headers().clone(),
+                axum::body::Body::new(reqwest::Body::from(response)),
+            )
+                .into_response();
+        }
+    }
+
+    (StatusCode::BAD_GATEWAY, "Bad Gateway").into_response()
 }
 
 static SINGLE_INSTANCE: OnceLock<single_instance::SingleInstance> = OnceLock::new();
 
-fn main() {
+#[tokio::main]
+async fn main() {
     // macOS app bundle prevents re-launching by default
     #[cfg(not(target_os = "macos"))]
     {
@@ -250,55 +239,37 @@ fn main() {
         }
     }
 
-    thread::spawn(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(10)
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
-                tokio::spawn(async { adb_connect_or_start().await.unwrap() });
+    tokio::spawn(async { adb_connect_or_start().await.unwrap() });
 
-                let ping = warp::get()
-                    .and(warp::path("ping"))
-                    .and(warp::path::end())
-                    .map(warp::reply)
-                    .with(
-                        warp::cors()
-                            .allow_origins([
+    let app = Router::new()
+        .nest(
+            "/bridge",
+            Router::new()
+                .route("/ping", get(|| async { "OK" }))
+                .route(
+                    "/",
+                    get(|ws: WebSocketUpgrade| async { ws.on_upgrade(handle_websocket) }),
+                )
+                .route_layer(
+                    CorsLayer::new()
+                        .allow_methods([Method::GET, Method::POST])
+                        .allow_origin(
+                            [
                                 "http://localhost:3002",
                                 "https://app.tangoapp.dev",
                                 "https://beta.tangoapp.dev",
-                            ])
-                            .build(),
-                    );
-                let ws = warp::path::end()
-                    .and(warp::ws())
-                    .map(|ws: warp::ws::Ws| ws.on_upgrade(|ws| handle_websocket(ws)));
-                let bridge = warp::path("bridge")
-                    .and(ping.or(ws))
-                    .with(warp::trace::request());
+                            ]
+                            .map(|x| x.parse().unwrap()),
+                        )
+                        .allow_private_network(true),
+                ),
+        )
+        .fallback(proxy_request);
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:15037")
+        .await
+        .unwrap();
 
-                let proxy = warp::any()
-                    .and(warp::method())
-                    .and(warp::path::tail())
-                    .and(
-                        warp::query::raw()
-                            .or_else(|_| async { Ok::<(String,), Infallible>(("".to_owned(),)) }),
-                    )
-                    .and(warp::body::stream())
-                    .and_then(proxy_request)
-                    .with(warp::trace::request());
-
-                let serve = warp::serve(bridge.or(proxy)).bind(([127, 0, 0, 1], 15037));
-
-                if env::args().all(|arg| arg != ARG_AUTO_RUN) {
-                    start_browser()
-                }
-
-                serve.await;
-            })
-    });
+    tokio::spawn(axum::serve(listener, app).into_future());
 
     let menu_open = MenuItem::new("Open", true, None);
 
@@ -343,6 +314,8 @@ fn main() {
         // https://github.com/glfw/glfw/issues/1552
         event_loop.set_activation_policy(tao::platform::macos::ActivationPolicy::Accessory);
     }
+
+    println!("Starting main loop");
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow =
