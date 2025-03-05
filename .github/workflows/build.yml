@@ -22,7 +22,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: "tango-bridge-windows-x86.exe"
+          name: "tango-bridge-windows-x86"
           path: "target/i686-pc-windows-msvc/release/tango_bridge_rs.exe"
 
   windows-x64:
@@ -41,5 +41,47 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: "tango-bridge-windows-x64.exe"
+          name: "tango-bridge-windows-x64"
           path: "target/x86_64-pc-windows-msvc/release/tango_bridge_rs.exe"
+
+  linux-x64:
+    name: "Linux x64"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup target add x86_64-unknown-linux-gnu
+
+      - name: Build
+        run: cargo build --target x86_64-unknown-linux-gnu --release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: "tango-bridge-linux-x64"
+          path: "target/x86_64-unknown-linux-gnu/release/tango_bridge_rs"
+
+  macos-x64:
+    name: "macOS x64"
+    runs-on: macos-13
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup target add x86_64-apple-darwin
+
+      - name: Build
+        run: cargo build --target x86_64-apple-darwin --release
+        env:
+          MACOSX_DEPLOYMENT_TARGET: 10.13
+
+      - run: cp target/x86_64-apple-darwin/release/tango_bridge_rs tango-bridge.app/Contents/MacOS/tango-bridge
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: "tango-bridge-macos-x64"
+          path: "tango-bridge.app"
