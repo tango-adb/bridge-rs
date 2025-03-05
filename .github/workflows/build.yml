@@ -1,0 +1,39 @@
+name: "Build"
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  windows-x86:
+    name: "Windows x86"
+    runs-on: windows-latest
+    steps:
+      - name: Install Rust toolchain
+        run: rustup target add i686-pc-windows-msvc
+
+      - name: Build
+        run: cargo build --target i686-pc-windows-msvc --release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: "tango-bridge-windows-x86.exe"
+          path: "target/i686-pc-windows-msvc/release/tango_bridge_rs.exe"
+
+  windows-x64:
+    name: "Windows x64"
+    runs-on: windows-latest
+    steps:
+      - name: Install Rust toolchain
+        run: rustup target add x86_64-pc-windows-msvc
+
+      - name: Build
+        run: cargo build --target x86_64-pc-windows-msvc --release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: "tango-bridge-windows-x64.exe"
+          path: "target/x86_64-pc-windows-msvc/release/tango_bridge_rs.exe"
