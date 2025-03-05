@@ -10,6 +10,9 @@ jobs:
     name: "Windows x86"
     runs-on: windows-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Install Rust toolchain
         run: rustup target add i686-pc-windows-msvc
 
@@ -26,6 +29,9 @@ jobs:
     name: "Windows x64"
     runs-on: windows-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Install Rust toolchain
         run: rustup target add x86_64-pc-windows-msvc
 
