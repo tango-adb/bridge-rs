@@ -3,8 +3,8 @@
 use std::{
     env,
     future::IntoFuture,
-    process::Stdio,
     sync::OnceLock,
+    thread,
     time::{Duration, Instant},
 };
 
@@ -22,120 +22,15 @@ use futures_util::{SinkExt, StreamExt};
 use http::{Method, StatusCode};
 use reqwest::Url;
 use tao::event_loop::EventLoopBuilder;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
-    process::Command,
-};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;
 use tray_icon::{
     menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     TrayIconBuilder, TrayIconEvent,
 };
 
-async fn adb_start(path: &str) -> tokio::io::Result<()> {
-    let mut command = Command::new(path);
-    command.args(&["server", "nodaemon"]);
-    command.env("ADB_MDNS_OPENSCREEN", "1");
-    command.stdout(Stdio::null());
-    command.stderr(Stdio::null());
-    #[cfg(windows)]
-    command.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    let mut process = command.spawn()?;
-    tokio::spawn(async move { process.wait().await });
-    Ok(())
-}
-
-async fn adb_connect() -> tokio::io::Result<TcpStream> {
-    TcpStream::connect("127.0.0.1:5037").await
-}
-
-async fn adb_connect_retry() -> tokio::io::Result<TcpStream> {
-    let mut i = 0;
-    loop {
-        match adb_connect().await {
-            Ok(result) => return Ok(result),
-            Err(err) => {
-                if i == 10 {
-                    return Err(err);
-                } else {
-                    i += 1;
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-            }
-        }
-    }
-}
-
-async fn adb_connect_or_start() -> tokio::io::Result<TcpStream> {
-    if let Ok(stream) = adb_connect().await {
-        return Ok(stream);
-    }
-
-    if adb_start("adb").await.is_ok() {
-        return adb_connect_retry().await;
-    }
-
-    #[cfg(windows)]
-    {
-        use tokio::fs::write;
-
-        let tmp_dir = env::temp_dir();
-        let adb_path = tmp_dir.join("adb.exe");
-
-        write(&adb_path, include_bytes!("../adb/win/adb.exe"))
-            .await
-            .unwrap();
-        write(
-            tmp_dir.join("AdbWinApi.dll"),
-            include_bytes!("../adb/win/AdbWinApi.dll"),
-        )
-        .await
-        .unwrap();
-        write(
-            tmp_dir.join("AdbWinUsbApi.dll"),
-            include_bytes!("../adb/win/AdbWinUsbApi.dll"),
-        )
-        .await
-        .unwrap();
-
-        adb_start(adb_path.to_str().unwrap()).await.unwrap();
-        adb_connect_retry().await
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        use tokio::fs::write;
-
-        let tmp_dir = env::temp_dir();
-        let adb_path = tmp_dir.join("adb");
-
-        use std::os::unix::fs::PermissionsExt;
-        write(&adb_path, include_bytes!("../adb/linux/adb"))
-            .await
-            .unwrap();
-        std::fs::set_permissions(&adb_path, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        adb_start(adb_path.to_str().unwrap()).await.unwrap();
-        adb_connect_retry().await
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        adb_start(
-            env::current_exe()
-                .unwrap()
-                .parent()
-                .unwrap()
-                .join("adb")
-                .to_str()
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-        adb_connect_retry().await
-    }
-}
+mod adb;
 
 fn start_browser() {
     open::that_detached("https://app.tangoapp.dev/?desktop=true").unwrap();
@@ -144,7 +39,7 @@ fn start_browser() {
 async fn handle_websocket(ws: WebSocket) {
     let (mut ws_writer, mut ws_reader) = ws.split();
 
-    let (mut adb_reader, mut adb_writer) = adb_connect_or_start().await.unwrap().into_split();
+    let (mut adb_reader, mut adb_writer) = adb::connect_or_start().await.unwrap().into_split();
 
     tokio::join!(
         async {
@@ -240,7 +135,30 @@ async fn main() {
         }
     }
 
-    tokio::spawn(async { adb_connect_or_start().await.unwrap() });
+    // Very strangely, running this in `tokio::spawn`
+    // will cause `listener` to not stop on Windows
+    adb::connect_or_start()
+        .await
+        .unwrap()
+        .shutdown()
+        .await
+        .unwrap();
+
+    #[cfg(debug_assertions)]
+    {
+        use tracing::Level;
+        use tracing_subscriber::FmtSubscriber;
+
+        let subscriber = FmtSubscriber::builder()
+            // all spans/events with a level higher than TRACE (e.g, debug, info, warn, etc.)
+            // will be written to stdout.
+            .with_max_level(Level::TRACE)
+            // completes the builder.
+            .finish();
+
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("setting default subscriber failed");
+    }
 
     let app = Router::new()
         .nest(
@@ -267,11 +185,28 @@ async fn main() {
                 ),
         )
         .fallback(proxy_request);
+
     let listener = tokio::net::TcpListener::bind("0.0.0.0:15037")
         .await
         .unwrap();
 
-    tokio::spawn(axum::serve(listener, app).into_future());
+    let token = CancellationToken::new();
+
+    let mut server = {
+        let token = token.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(token.cancelled_owned())
+                .into_future()
+                .await
+        });
+        Some(server)
+    };
+    println!("server started on thread {:?}", thread::current().id());
+
+    if env::args().all(|arg| arg != ARG_AUTO_RUN) {
+        start_browser()
+    }
 
     let menu_open = MenuItem::new("Open", true, None);
 
@@ -317,7 +252,7 @@ async fn main() {
         event_loop.set_activation_policy(tao::platform::macos::ActivationPolicy::Accessory);
     }
 
-    println!("Starting main loop");
+    println!("before main loop");
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow =
@@ -375,6 +310,20 @@ async fn main() {
 
             if event.id == menu_quit.id() {
                 tray_icon.take();
+
+                token.cancel();
+                println!("trigger token cancel");
+
+                let server = server.take().unwrap();
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(server)
+                        .unwrap()
+                        .unwrap();
+                    println!("server exited");
+                });
+
+                println!("exiting main loop");
                 *control_flow = tao::event_loop::ControlFlow::Exit;
                 return;
             }
