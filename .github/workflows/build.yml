@@ -23,7 +23,7 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-          key: ${{ github.job }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+          key: ${{ github.job }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ github.job }}-cargo-
 
@@ -36,7 +36,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: "tango-bridge-windows-x86"
+          name: "windows-x86"
           path: "target/i686-pc-windows-msvc/release/tango_bridge_rs.exe"
 
   windows-x64:
@@ -53,7 +53,7 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-          key: ${{ github.job }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+          key: ${{ github.job }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ github.job }}-cargo-
 
@@ -66,7 +66,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: "tango-bridge-windows-x64"
+          name: "windows-x64"
           path: "target/x86_64-pc-windows-msvc/release/tango_bridge_rs.exe"
 
   linux-x64:
@@ -86,7 +86,7 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-          key: ${{ github.job }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+          key: ${{ github.job }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ github.job }}-cargo-
 
@@ -99,7 +99,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: "tango-bridge-linux-x64"
+          name: "linux-x64"
           path: "target/x86_64-unknown-linux-gnu/release/tango_bridge_rs"
 
   macos-x64:
@@ -116,7 +116,7 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-          key: ${{ github.job }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+          key: ${{ github.job }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ github.job }}-cargo-
 
@@ -133,7 +133,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: "tango-bridge-macos-x64"
+          name: "macos-x64"
           path: "tango-bridge.app"
 
   macos-aarch64:
@@ -150,7 +150,7 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-          key: ${{ github.job }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+          key: ${{ github.job }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ github.job }}-cargo-
 
@@ -167,5 +167,33 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: "tango-bridge-macos-aarch64"
+          name: "macos-aarch64"
           path: "tango-bridge.app"
+
+  macos-universal:
+    name: "macOS Universal"
+    runs-on: macos-latest
+    steps:
+      - name: Download macos-x64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-x64
+          path: macos-x64-artifact
+
+      - name: Download macos-aarch64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-aarch64
+          path: macos-aarch64-artifact
+
+      - name: Create universal binary
+        run: |
+          lipo -create -output tango-bridge-universal macos-x64-artifact/tango-bridge.app/Contents/MacOS/tango-bridge macos-aarch64-artifact/tango-bridge.app/Contents/MacOS/tango-bridge
+          cp tango-bridge-universal macos-x64-artifact/tango-bridge.app/Contents/MacOS/tango-bridge
+          rm tango-bridge-universal
+
+      - name: Upload macos-universal artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-universal
+          path: macos-x64-artifact/tango-bridge.app
