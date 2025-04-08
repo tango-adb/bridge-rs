@@ -5,7 +5,12 @@ on:
     branches:
       - main
     paths:
-      - .
+      - adb/**/*
+      - src/**/*
+      - tango-bridge.app/**/*
+      - build.rs
+      - Cargo.toml
+      - Cargo.lock
   workflow_dispatch:
 
 jobs:
