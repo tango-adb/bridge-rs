@@ -173,6 +173,9 @@ jobs:
   macos-universal:
     name: "macOS Universal"
     runs-on: macos-latest
+    needs:
+      - macos-x64
+      - macos-aarch64
     steps:
       - name: Download macos-x64 artifact
         uses: actions/download-artifact@v4
