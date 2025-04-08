@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - .
+  workflow_dispatch:
 
 jobs:
   windows-x86:
