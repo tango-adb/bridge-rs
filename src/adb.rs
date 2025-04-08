@@ -1,4 +1,4 @@
-use std::{env, fs::exists, mem, path::Path, process::Stdio, time::Duration};
+use std::{env, mem, path::Path, process::Stdio, time::Duration};
 
 use tokio::{net::TcpStream, process::Command};
 
@@ -62,6 +62,7 @@ pub async fn connect_or_start() -> tokio::io::Result<TcpStream> {
 
     #[cfg(windows)]
     {
+        use std::fs::exists;
         use tokio::fs::write;
 
         let tmp_dir = env::temp_dir();
@@ -86,13 +87,14 @@ pub async fn connect_or_start() -> tokio::io::Result<TcpStream> {
 
     #[cfg(target_os = "linux")]
     {
+        use std::fs::exists;
+        use std::os::unix::fs::PermissionsExt;
         use tokio::fs::write;
 
         let tmp_dir = env::temp_dir();
         let adb_path = tmp_dir.join("adb");
 
         if !exists(&adb_path)? {
-            use std::os::unix::fs::PermissionsExt;
             write(&adb_path, include_bytes!("../adb/linux/adb")).await?;
             std::fs::set_permissions(&adb_path, std::fs::Permissions::from_mode(0o755))?;
         }
@@ -102,7 +104,7 @@ pub async fn connect_or_start() -> tokio::io::Result<TcpStream> {
 
     #[cfg(target_os = "macos")]
     {
-        adb_start(env::current_exe().unwrap().parent().unwrap().join("adb")).await?;
+        adb_start(env::current_exe().unwrap().parent().unwrap().join("adb").as_path()).await?;
     }
 
     adb_connect_retry().await
