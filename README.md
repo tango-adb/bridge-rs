@@ -8,23 +8,20 @@ An ADB executable for each platform is included.
 
 ### Prerequisites
 
-- Rust
+- [Rust](https://rustup.rs/)
 
 ### Windows
 
-Visual Studio is required to build the project.
-
 ```sh
-./build.ps1
+cargo build --release
 ```
 
 ### macOS
 
-1. Open `build.sh`
-2. Change `sdk_version` to the version of MacOS SDK installed on your system
+Xcode is required to build aarch64 (arm64) version.
 
 ```sh
-./build.sh
+cargo build --release
 ```
 
 ### Linux
