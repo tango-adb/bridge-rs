@@ -10,6 +10,7 @@ use std::{
 
 use auto_launch::AutoLaunchBuilder;
 use axum::{
+    body::Bytes,
     extract::{
         ws::{Message, WebSocket},
         Request, WebSocketUpgrade,
@@ -22,7 +23,10 @@ use futures_util::{SinkExt, StreamExt};
 use http::{Method, StatusCode};
 use reqwest::Url;
 use tao::event_loop::EventLoopBuilder;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    sync::mpsc::channel,
+};
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;
 use tray_icon::{
@@ -38,33 +42,53 @@ fn start_browser() {
 
 async fn handle_websocket(ws: WebSocket) {
     let (mut ws_writer, mut ws_reader) = ws.split();
-
     let (mut adb_reader, mut adb_writer) = adb::connect_or_start().await.unwrap().into_split();
 
+    let (ws_to_adb_sender, mut ws_to_adb_receiver) = channel::<Bytes>(16);
+    let (adb_to_ws_sender, mut adb_to_ws_receiver) = channel::<Vec<u8>>(16);
+
     tokio::join!(
-        async {
+        async move {
             while let Some(Ok(message)) = ws_reader.next().await {
                 // Don't merge with `if` above to ignore other message types
                 if let Message::Binary(packet) = message {
-                    adb_writer.write_all(packet.as_ref()).await.unwrap();
+                    if ws_to_adb_sender.send(packet).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        },
+        async move {
+            while let Some(buf) = ws_to_adb_receiver.recv().await {
+                if adb_writer.write_all(buf.as_ref()).await.is_err() {
+                    break;
                 }
             }
             adb_writer.shutdown().await.unwrap();
         },
-        async {
-            let mut buf = vec![0; 1024 * 1024];
+        async move {
             loop {
+                let mut buf = vec![0; 1024 * 1024];
                 match adb_reader.read(&mut buf).await {
                     Ok(0) | Err(_) => {
-                        ws_writer.close().await.unwrap();
                         break;
                     }
-                    Ok(n) => ws_writer
-                        .send(Message::binary(buf[..n].to_vec()))
-                        .await
-                        .unwrap(),
+                    Ok(n) => {
+                        buf.truncate(n);
+                        if adb_to_ws_sender.send(buf).await.is_err() {
+                            break;
+                        }
+                    }
                 }
             }
+        },
+        async move {
+            while let Some(buf) = adb_to_ws_receiver.recv().await {
+                if ws_writer.send(Message::binary(buf)).await.is_err() {
+                    break;
+                }
+            }
+            ws_writer.close().await.unwrap();
         }
     );
 }
@@ -72,9 +96,9 @@ async fn handle_websocket(ws: WebSocket) {
 const ARG_AUTO_RUN: &str = "--auto-run";
 
 #[cfg(debug_assertions)]
-const PROXY_HOST: &str = "https://app.tangoapp.dev";
+const PROXY_HOST: &str = "https://tangoapp.dev";
 #[cfg(not(debug_assertions))]
-const PROXY_HOST: &str = "https://app.tangoapp.dev";
+const PROXY_HOST: &str = "https://tangoapp.dev";
 
 static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
@@ -175,6 +199,7 @@ async fn main() {
                         .allow_origin(
                             [
                                 "http://localhost:3002",
+                                "https://tangoapp.dev",
                                 "https://app.tangoapp.dev",
                                 "https://beta.tangoapp.dev",
                                 "https://tunnel.tangoapp.dev",
