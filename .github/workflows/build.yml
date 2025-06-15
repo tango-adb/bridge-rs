@@ -138,12 +138,14 @@ jobs:
           mkdir -p artifact
           cp -r tango-bridge.app artifact/
           cp target/x86_64-apple-darwin/release/tango_bridge_rs artifact/tango-bridge.app/Contents/MacOS/tango-bridge
+          # compress the folder because `actions/upload-artifact` doesn't preserve executable permissions
+          zip -r artifact.zip artifact
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ github.job}}
-          path: artifact
+          path: artifact.zip
 
   macos-aarch64:
     name: "macOS aarch64"
@@ -176,12 +178,14 @@ jobs:
           mkdir -p artifact
           cp -r tango-bridge.app artifact/
           cp target/aarch64-apple-darwin/release/tango_bridge_rs artifact/tango-bridge.app/Contents/MacOS/tango-bridge
+          # compress the folder because `actions/upload-artifact` doesn't preserve executable permissions
+          zip -r artifact.zip artifact
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ github.job}}
-          path: artifact
+          path: artifact.zip
 
   macos-universal:
     name: "macOS Universal"
@@ -202,14 +206,24 @@ jobs:
           name: macos-aarch64
           path: macos-aarch64-artifact
 
+      - name: Unzip artifacts
+        run: |
+          ls -al
+          unzip macos-x64-artifact.zip
+          unzip macos-aarch64-artifact.zip
+
       - name: Create universal binary
         run: |
           lipo -create -output tango-bridge-universal macos-x64-artifact/tango-bridge.app/Contents/MacOS/tango-bridge macos-aarch64-artifact/tango-bridge.app/Contents/MacOS/tango-bridge
+
+      - name: Prepare artifact
+        run: |
           cp tango-bridge-universal macos-x64-artifact/tango-bridge.app/Contents/MacOS/tango-bridge
-          rm tango-bridge-universal
+          # compress the folder because `actions/upload-artifact` doesn't preserve executable permissions
+          zip -r artifact.zip macos-x64-artifact
 
       - name: Upload macos-universal artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ github.job}}
-          path: macos-x64-artifact
+          path: artifact.zip
