@@ -2356,8 +2356,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "tango_bridge_rs"
-version = "0.1.0"
+name = "tango_bridge"
+version = "0.2.0"
 dependencies = [
  "auto-launch",
  "axum",

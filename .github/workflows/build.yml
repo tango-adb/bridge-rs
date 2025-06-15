@@ -14,8 +14,13 @@ on:
   workflow_dispatch:
 
 jobs:
-  windows-x86:
-    name: "Windows x86"
+  windows:
+    strategy:
+      matrix:
+        include:
+          - { arch: i686 }
+          - { arch: x86_64 }
+    name: "Windows ${{ matrix.arch }}"
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -28,51 +33,21 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-          key: ${{ github.job }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: windows-${{ matrix.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ github.job }}-cargo-
+            windows-${{ matrix.arch }}-cargo-
 
       - name: Install Rust toolchain
-        run: rustup target add i686-pc-windows-msvc
+        run: rustup target add ${{ matrix.arch }}-pc-windows-msvc
 
       - name: Build
-        run: cargo build --target i686-pc-windows-msvc --release
+        run: cargo build --target ${{ matrix.arch }}-pc-windows-msvc --release
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ github.job}}
-          path: "target/i686-pc-windows-msvc/release/tango_bridge_rs.exe"
-
-  windows-x64:
-    name: "Windows x64"
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Cache Cargo packages
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: ${{ github.job }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ github.job }}-cargo-
-
-      - name: Install Rust toolchain
-        run: rustup target add x86_64-pc-windows-msvc
-
-      - name: Build
-        run: cargo build --target x86_64-pc-windows-msvc --release
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ github.job}}
-          path: "target/x86_64-pc-windows-msvc/release/tango_bridge_rs.exe"
+          name: windows-${{ matrix.arch }}
+          path: "target/${{ matrix.arch }}-pc-windows-msvc/release/tango_bridge.exe"
 
   linux-x64:
     name: "Linux x64"
@@ -105,7 +80,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ github.job}}
-          path: "target/x86_64-unknown-linux-gnu/release/tango_bridge_rs"
+          path: "target/x86_64-unknown-linux-gnu/release/tango_bridge"
 
   macos-builds:
     strategy:
@@ -140,7 +115,7 @@ jobs:
 
       - name: Prepare artifact
         run: |
-          cp target/${{ matrix.arch }}-apple-darwin/release/tango_bridge_rs tango-bridge.app/Contents/MacOS/tango-bridge
+          cp target/${{ matrix.arch }}-apple-darwin/release/tango_bridge tango-bridge.app/Contents/MacOS/tango-bridge
           # compress the folder because `actions/upload-artifact` doesn't preserve executable permissions
           zip -r macos-${{ matrix.arch }}.zip tango-bridge.app
 
@@ -170,10 +145,8 @@ jobs:
 
       - name: Unzip artifacts
         run: |
-          ls -alR
           unzip macos-x86_64-artifact/macos-x86_64.zip -d macos-x86_64
           unzip macos-aarch64-artifact/macos-aarch64.zip -d macos-aarch64
-          ls -alR
 
       - name: Create universal binary
         run: |

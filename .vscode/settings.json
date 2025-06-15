@@ -4,4 +4,5 @@
     "reqwest",
     "rustup"
   ],
+  "editor.formatOnSave": false,
 }
