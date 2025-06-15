@@ -107,9 +107,14 @@ jobs:
           name: ${{ github.job}}
           path: "target/x86_64-unknown-linux-gnu/release/tango_bridge_rs"
 
-  macos-x64:
-    name: "macOS x64"
-    runs-on: macos-13
+  macos-builds:
+    strategy:
+      matrix:
+        include:
+          - { os: macos-latest, arch: aarch64 }
+          - { os: macos-13, arch: x86_64 }
+    name: "macOS ${{ matrix.arch }}"
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -121,84 +126,41 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-          key: ${{ github.job }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: macos-${{ matrix.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ github.job }}-cargo-
+            macos-${{ matrix.arch }}-cargo-
 
       - name: Install Rust toolchain
-        run: rustup target add x86_64-apple-darwin
+        run: rustup target add ${{ matrix.arch }}-apple-darwin
 
       - name: Build
-        run: cargo build --target x86_64-apple-darwin --release
+        run: cargo build --target ${{ matrix.arch }}-apple-darwin --release
         env:
           MACOSX_DEPLOYMENT_TARGET: 10.13
 
       - name: Prepare artifact
         run: |
-          mkdir -p artifact
-          cp -r tango-bridge.app artifact/
-          cp target/x86_64-apple-darwin/release/tango_bridge_rs artifact/tango-bridge.app/Contents/MacOS/tango-bridge
+          cp target/${{ matrix.arch }}-apple-darwin/release/tango_bridge_rs tango-bridge.app/Contents/MacOS/tango-bridge
           # compress the folder because `actions/upload-artifact` doesn't preserve executable permissions
-          zip -r artifact.zip artifact
+          zip -r macos-${{ matrix.arch }}.zip tango-bridge.app
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ github.job}}
-          path: artifact.zip
-
-  macos-aarch64:
-    name: "macOS aarch64"
-    runs-on: macos-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Cache Cargo packages
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: ${{ github.job }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ github.job }}-cargo-
-
-      - name: Install Rust toolchain
-        run: rustup target add aarch64-apple-darwin
-
-      - name: Build
-        run: cargo build --target aarch64-apple-darwin --release
-        env:
-          MACOSX_DEPLOYMENT_TARGET: 10.13
-
-      - name: Prepare artifact
-        run: |
-          mkdir -p artifact
-          cp -r tango-bridge.app artifact/
-          cp target/aarch64-apple-darwin/release/tango_bridge_rs artifact/tango-bridge.app/Contents/MacOS/tango-bridge
-          # compress the folder because `actions/upload-artifact` doesn't preserve executable permissions
-          zip -r artifact.zip artifact
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ github.job}}
-          path: artifact.zip
+          name: macos-${{ matrix.arch }}
+          path: macos-${{ matrix.arch }}.zip
 
   macos-universal:
     name: "macOS Universal"
     runs-on: macos-latest
     needs:
-      - macos-x64
-      - macos-aarch64
+      - macos-builds
     steps:
-      - name: Download macos-x64 artifact
+      - name: Download macos-x86_64 artifact
         uses: actions/download-artifact@v4
         with:
-          name: macos-x64
-          path: macos-x64-artifact
+          name: macos-x86_64
+          path: macos-x86_64-artifact
 
       - name: Download macos-aarch64 artifact
         uses: actions/download-artifact@v4
@@ -208,22 +170,23 @@ jobs:
 
       - name: Unzip artifacts
         run: |
-          ls -al
-          unzip macos-x64-artifact.zip
-          unzip macos-aarch64-artifact.zip
+          ls -alR
+          unzip macos-x86_64-artifact/macos-x86_64.zip -d macos-x86_64
+          unzip macos-aarch64-artifact/macos-aarch64.zip -d macos-aarch64
+          ls -alR
 
       - name: Create universal binary
         run: |
-          lipo -create -output tango-bridge-universal macos-x64-artifact/tango-bridge.app/Contents/MacOS/tango-bridge macos-aarch64-artifact/tango-bridge.app/Contents/MacOS/tango-bridge
+          lipo -create -output tango-bridge-universal macos-x86_64/tango-bridge.app/Contents/MacOS/tango-bridge macos-aarch64/tango-bridge.app/Contents/MacOS/tango-bridge
 
       - name: Prepare artifact
         run: |
-          cp tango-bridge-universal macos-x64-artifact/tango-bridge.app/Contents/MacOS/tango-bridge
+          cp -f tango-bridge-universal macos-x86_64/tango-bridge.app/Contents/MacOS/tango-bridge
           # compress the folder because `actions/upload-artifact` doesn't preserve executable permissions
-          zip -r artifact.zip macos-x64-artifact
+          zip -r macos-universal.zip macos-x86_64/tango-bridge.app
 
       - name: Upload macos-universal artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ github.job}}
-          path: artifact.zip
+          path: macos-universal.zip
