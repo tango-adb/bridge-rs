@@ -188,7 +188,7 @@ async fn main() {
         .nest(
             "/bridge",
             Router::new()
-                .route("/ping", get(|| async { "OK" }))
+                .route("/ping", get(|| async { env!("CARGO_PKG_VERSION") }))
                 .route(
                     "/",
                     get(|ws: WebSocketUpgrade| async { ws.on_upgrade(handle_websocket) }),
