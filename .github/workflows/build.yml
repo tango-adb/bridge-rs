@@ -5,6 +5,7 @@ on:
     branches:
       - main
     paths:
+      - .github/workflows/*
       - adb/**/*
       - src/**/*
       - tango-bridge.app/**/*
@@ -155,8 +156,9 @@ jobs:
       - name: Prepare artifact
         run: |
           cp -f tango-bridge-universal macos-x86_64/tango-bridge.app/Contents/MacOS/tango-bridge
+          cd macos-x86_64
           # compress the folder because `actions/upload-artifact` doesn't preserve executable permissions
-          zip -r macos-universal.zip macos-x86_64/tango-bridge.app
+          zip -r ../macos-universal.zip tango-bridge.app
 
       - name: Upload macos-universal artifact
         uses: actions/upload-artifact@v4
