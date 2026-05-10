@@ -3,7 +3,8 @@
 Tango Bridge supports two authentication modes for WebSocket connections.
 
 - **PIN authentication** – always active; a 6-digit PIN is generated on first run.
-- **Public-key (Ed25519) authentication** – opt-in; a public key is embedded at build time.
+- **Public-key (Ed25519) authentication** – opt-in; one or more public keys are
+  configured at build time and/or at runtime.
 
 A WebSocket connection is accepted when **either** mode produces a valid credential.
 
@@ -45,32 +46,89 @@ openssl pkey -in private.pem -pubout -outform DER \
   | base64
 ```
 
-Store the private key (PEM or DER) securely on the server that will sign connection tokens. The raw 32-byte base64 string is the value you supply to `cargo build` in the next step.
+Store the private key (PEM or DER) securely on the server that will sign connection tokens. The raw 32-byte base64 string is the value you supply in the next step.
 
 ---
 
-## 2. Building with an Embedded Public Key
+## 2. Configuring Public Keys
 
-Pass the raw 32-byte public key (standard base64) via the `TANGO_BRIDGE_PUBLIC_KEY` environment variable at build time:
+### Build-time (embedded permanently in the binary)
+
+Pass one or more raw 32-byte public keys (standard base64, comma-separated) via
+`TANGO_BRIDGE_PUBLIC_KEY` at build time:
 
 ```sh
-# macOS / Linux
-TANGO_BRIDGE_PUBLIC_KEY="<base64-encoded-32-byte-public-key>" cargo build --release
+# Single key — macOS / Linux
+TANGO_BRIDGE_PUBLIC_KEY="<key1-base64>" cargo build --release
+
+# Multiple keys — macOS / Linux
+TANGO_BRIDGE_PUBLIC_KEY="<key1-base64>,<key2-base64>" cargo build --release
 
 # Windows (PowerShell)
-$env:TANGO_BRIDGE_PUBLIC_KEY = "<base64-encoded-32-byte-public-key>"
+$env:TANGO_BRIDGE_PUBLIC_KEY = "<key1-base64>,<key2-base64>"
 cargo build --release
 ```
 
-The key is baked into the binary with `option_env!`. If the variable is not set, public-key authentication is disabled and only PIN authentication is active.
+The keys are baked into the binary with `option_env!`.
+
+### Runtime (read when the server starts)
+
+Set the same `TANGO_BRIDGE_PUBLIC_KEY` environment variable when **running** the
+binary (comma-separated). These keys are in addition to any build-time keys:
+
+```sh
+TANGO_BRIDGE_PUBLIC_KEY="<key1-base64>" ./tango-bridge
+```
+
+If neither build-time nor runtime keys are configured, public-key authentication
+is disabled and only PIN authentication is active.
 
 ---
 
-## 3. Generating Signatures on the Server Side
+## 3. Authentication Flow for Public-Key Auth
 
-The signature is an Ed25519 signature of the **current UTC date string** in `YYYY-MM-DD` format (e.g. `"2024-07-15"`). The server verifies today's date as well as the previous and next day (±1 day) to tolerate clock skew.
+The public-key flow uses a **challenge–response** scheme to prevent replay attacks.
+Each challenge is single-use and expires after **one hour**.
 
-> **Important:** The private key must **never** be embedded in client-side (browser) code. Websites must call a backend API endpoint to obtain a fresh token, as shown in the examples below.
+```
+Client                              Tango Bridge
+  │                                      │
+  │  GET /bridge/ping                    │
+  │─────────────────────────────────────>│
+  │                                      │  generate challenge
+  │  { "version": "…", "challenge": "…" }│
+  │<─────────────────────────────────────│
+  │                                      │
+  │  (server-side) sign(challenge)       │
+  │  → token                             │
+  │                                      │
+  │  WebSocket /bridge/?challenge=…      │
+  │              &token=…                │
+  │─────────────────────────────────────>│  verify token & consume challenge
+  │  (upgrade)                           │
+  │<─────────────────────────────────────│
+```
+
+1. **Fetch a challenge** from `GET /bridge/ping`:
+   ```json
+   { "version": "0.3.0", "challenge": "dGFuZ29icmlkZ2U" }
+   ```
+2. **Sign the challenge** on your server (never in the browser – see §4).
+3. **Connect** the WebSocket with both `challenge` and `token` query parameters.
+
+> Challenges expire after one hour. The client must fetch a fresh challenge before
+> reconnecting after expiry.
+
+---
+
+## 4. Generating Signatures on the Server Side
+
+The signature is an Ed25519 signature of the **challenge string** (UTF-8 bytes) received
+from `/bridge/ping`.
+
+> **Important:** The private key must **never** be embedded in client-side (browser)
+> code. Websites must call a backend API endpoint to obtain a fresh token, as shown
+> in the examples below.
 
 ### Node.js (server-side API endpoint)
 
@@ -83,23 +141,25 @@ import { createServer } from "node:http";
 // Load the private key (PEM file kept on the server, never shipped to clients)
 const privateKeyPem = readFileSync("private.pem");
 
-function getUtcDateString() {
-  return new Date().toISOString().slice(0, 10); // "YYYY-MM-DD"
-}
-
-function generateToken() {
-  const date = getUtcDateString();
+function generateToken(challenge) {
   const sign = createSign("Ed25519");
-  sign.update(date);
+  sign.update(challenge);
   sign.end();
   // The bridge accepts URL-safe base64 (no padding) or standard base64
   return sign.sign(privateKeyPem).toString("base64url");
 }
 
-const server = createServer((req, res) => {
-  if (req.url === "/token") {
+const server = createServer(async (req, res) => {
+  const url = new URL(req.url, "http://localhost");
+
+  if (url.pathname === "/token") {
+    // 1. Fetch a challenge from Tango Bridge
+    const pingRes = await fetch("http://localhost:15037/bridge/ping");
+    const { challenge } = await pingRes.json();
+
+    // 2. Sign it and return both values to the browser
     res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ token: generateToken() }));
+    res.end(JSON.stringify({ challenge, token: generateToken(challenge) }));
   } else {
     res.writeHead(404);
     res.end();
@@ -134,10 +194,6 @@ async function getPrivateKey(): Promise<CryptoKey> {
   return cachedKey;
 }
 
-function getUtcDateString(): string {
-  return new Date().toISOString().slice(0, 10); // "YYYY-MM-DD"
-}
-
 function toBase64Url(buf: ArrayBuffer): string {
   return btoa(String.fromCharCode(...new Uint8Array(buf)))
     .replace(/\+/g, "-")
@@ -146,35 +202,46 @@ function toBase64Url(buf: ArrayBuffer): string {
 }
 
 export async function GET() {
+  // 1. Fetch a challenge from Tango Bridge
+  const pingRes = await fetch("http://localhost:15037/bridge/ping");
+  const { challenge } = await pingRes.json();
+
+  // 2. Sign the challenge string (UTF-8)
   const key = await getPrivateKey();
-  const date = getUtcDateString();
   const sig = await crypto.subtle.sign(
     "Ed25519",
     key,
-    new TextEncoder().encode(date),
+    new TextEncoder().encode(challenge),
   );
-  return NextResponse.json({ token: toBase64Url(sig) });
+
+  // 3. Return both values to the browser
+  return NextResponse.json({ challenge, token: toBase64Url(sig) });
 }
 ```
 
 ---
 
-## 4. Creating WebSocket Connections from the Browser
+## 5. Creating WebSocket Connections from the Browser
 
-All WebSocket connections are opened from browser JavaScript. The credential is passed as a query string parameter on the WebSocket URL.
+All WebSocket connections are opened from browser JavaScript. The credential is passed
+as query string parameters on the WebSocket URL.
 
 ### Connection with a signature token
 
-The client first fetches a fresh token from your server-side API, then opens the WebSocket:
+The client first fetches a `challenge` + `token` pair from your server-side API, then
+opens the WebSocket:
 
 ```js
 async function connectWithToken() {
-  // 1. Fetch a short-lived token from your backend (private key stays on the server)
+  // 1. Fetch a challenge and its signature from your backend
+  //    (the backend calls /bridge/ping and signs the challenge server-side)
   const res = await fetch("https://your-server.example.com/token");
-  const { token } = await res.json();
+  const { challenge, token } = await res.json();
 
   // 2. Open the WebSocket connection to Tango Bridge
-  const ws = new WebSocket(`ws://localhost:15037/bridge/?token=${token}`);
+  const ws = new WebSocket(
+    `ws://localhost:15037/bridge/?challenge=${encodeURIComponent(challenge)}&token=${encodeURIComponent(token)}`
+  );
 
   ws.binaryType = "arraybuffer";
 
@@ -197,7 +264,8 @@ async function connectWithToken() {
 
 ### Connection with a PIN
 
-Display the PIN to the user (they read it from the Tango Bridge tray menu) and pass it directly:
+Display the PIN to the user (they read it from the Tango Bridge tray menu) and pass it
+directly:
 
 ```js
 function connectWithPin(pin) {
@@ -243,7 +311,20 @@ function handleAdbData(data /* Uint8Array */) {
 
 ## Quick Reference
 
-| Parameter | Value | Notes |
-|-----------|-------|-------|
-| `token`   | URL-safe base64 (no padding) or standard base64 Ed25519 signature of `YYYY-MM-DD` | Requires public key embedded at build time |
-| `pin`     | 6-digit zero-padded string, e.g. `042817` | Found in `~/.android/tango-bridge.pin` and the tray icon menu |
+### `/bridge/ping` endpoint
+
+`GET http://localhost:15037/bridge/ping` — returns:
+
+```json
+{ "version": "0.3.0", "challenge": "<22-char URL-safe base64>" }
+```
+
+The challenge is valid for **one hour** and can only be used **once**.
+
+### WebSocket query parameters
+
+| Parameter   | Value | Notes |
+|-------------|-------|-------|
+| `challenge` | Challenge string from `/bridge/ping` | Required for public-key auth |
+| `token`     | URL-safe base64 (no padding) or standard base64 Ed25519 signature of the challenge | Required for public-key auth |
+| `pin`       | 6-digit zero-padded string, e.g. `042817` | Found in `~/.android/tango-bridge.pin` and the tray icon menu |

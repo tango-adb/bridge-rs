@@ -105,8 +105,18 @@ async fn ws_handler(
     ws.on_upgrade(handle_websocket)
 }
 
-const ARG_AUTO_RUN: &str = "--auto-run";
-
+async fn ping_handler() -> impl IntoResponse {
+    let challenge = auth::generate_challenge();
+    let body = format!(
+        r#"{{"version":"{}","challenge":"{}"}}"#,
+        env!("CARGO_PKG_VERSION"),
+        challenge,
+    );
+    (
+        [(http::header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+}
 
 #[cfg(debug_assertions)]
 const PROXY_HOST: &str = "https://tangoapp.dev";
@@ -203,7 +213,7 @@ async fn main() {
         .nest(
             "/bridge",
             Router::new()
-                .route("/ping", get(|| async { env!("CARGO_PKG_VERSION") }))
+                .route("/ping", get(ping_handler))
                 .route(
                     "/",
                     get(ws_handler),
