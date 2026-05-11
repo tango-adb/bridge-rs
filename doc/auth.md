@@ -241,14 +241,14 @@ let authCache = null; // { challenge, token, expiresAt }
 
 async function getAuth() {
   const now = Date.now();
-  // Refresh 5 minutes before the 1-hour challenge expires
+  // Refresh 5 minutes before the challenge expires
   if (authCache && authCache.expiresAt - now > 5 * 60 * 1000) {
     return authCache;
   }
 
   // 1. Fetch a challenge from Tango Bridge
   const pingRes = await fetch("http://localhost:15037/bridge/ping");
-  const { challenge } = await pingRes.json();
+  const { challenge, challengeTtl } = await pingRes.json();
 
   // 2. Ask your backend to sign it (private key never leaves the server)
   const tokenRes = await fetch("https://your-server.example.com/token", {
@@ -258,7 +258,7 @@ async function getAuth() {
   });
   const { token } = await tokenRes.json();
 
-  authCache = { challenge, token, expiresAt: now + 60 * 60 * 1000 };
+  authCache = { challenge, token, expiresAt: now + challengeTtl * 1000 };
   return authCache;
 }
 
@@ -364,11 +364,13 @@ function handleAdbData(data /* Uint8Array */) {
 {
   "version": "0.3.0",
   "challenge": "<22-char URL-safe base64>",
-  "publicKeys": ["<base64-key1>", "<base64-key2>"]
+  "publicKeys": ["<base64-key1>", "<base64-key2>"],
+  "challengeTtl": 3600
 }
 ```
 
-- `challenge` is valid for **one hour** and may be reused for multiple connections.
+- `challenge` may be reused for multiple connections until it expires.
+- `challengeTtl` is the challenge lifetime in seconds; refresh the challenge before this many seconds have elapsed (e.g. after 55 minutes to be safe).
 - `publicKeys` lists the currently trusted public keys (empty array when no keys are configured).
 
 ### WebSocket query parameters

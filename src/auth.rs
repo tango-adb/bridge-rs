@@ -17,16 +17,33 @@ use rand::{Rng, RngCore};
 /// commas.
 const PUBLIC_KEY_B64: Option<&str> = option_env!("TANGO_BRIDGE_PUBLIC_KEY");
 
-/// Challenges expire after 1 hour.
-const CHALLENGE_TTL: Duration = Duration::from_secs(3600);
+/// Challenges expire after this duration.
+pub const CHALLENGE_TTL: Duration = Duration::from_secs(3600);
+
+/// A trusted Ed25519 public key together with its base64 representation.
+pub struct PublicKey {
+    /// Standard base64-encoded raw 32-byte key (as supplied in `TANGO_BRIDGE_PUBLIC_KEY`).
+    pub b64: String,
+    /// The parsed verifying key, ready for signature verification.
+    pub key: VerifyingKey,
+}
 
 static PIN: OnceLock<RwLock<String>> = OnceLock::new();
+/// Cached list of trusted public keys, initialised once in [`init`].
+static PUBLIC_KEYS: OnceLock<Vec<PublicKey>> = OnceLock::new();
 
 /// Map from challenge string to the `Instant` it was created.
 static CHALLENGES: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
 
 fn challenges() -> &'static Mutex<HashMap<String, Instant>> {
     CHALLENGES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Return the cached slice of trusted public keys.
+///
+/// Returns an empty slice before [`init`] is called or when no keys are configured.
+pub fn public_keys() -> &'static [PublicKey] {
+    PUBLIC_KEYS.get().map(Vec::as_slice).unwrap_or(&[])
 }
 
 fn home_dir() -> PathBuf {
@@ -94,24 +111,22 @@ fn validate_challenge(challenge: &str) -> bool {
 // Public-key helpers
 // ---------------------------------------------------------------------------
 
-/// Parse a standard base64-encoded 32-byte Ed25519 public key.
-fn parse_verifying_key(b64: &str) -> Option<VerifyingKey> {
+/// Parse a standard base64-encoded 32-byte Ed25519 public key into a [`PublicKey`].
+fn parse_public_key(b64: &str) -> Option<PublicKey> {
     let bytes = STANDARD.decode(b64.trim()).ok()?;
     let array: [u8; 32] = bytes.try_into().ok()?;
-    VerifyingKey::from_bytes(&array).ok()
+    let key = VerifyingKey::from_bytes(&array).ok()?;
+    Some(PublicKey {
+        b64: b64.trim().to_string(),
+        key,
+    })
 }
 
-/// Collect all verifying keys from two sources (duplicates are harmless):
+/// Build the list of trusted public keys from build-time and runtime sources.
 ///
-/// 1. **Build-time** – `TANGO_BRIDGE_PUBLIC_KEY` baked in via `option_env!`
-///    at `cargo build` time (comma-separated list).
-/// 2. **Runtime** – `TANGO_BRIDGE_PUBLIC_KEY` read from the process
-///    environment when the server starts (comma-separated list).
-///
-/// Both sources use the same environment variable name; the difference is
-/// *when* the value is read: compile-time vs. run-time.
-fn get_verifying_keys() -> Vec<VerifyingKey> {
-    let mut keys = Vec::new();
+/// Called once from [`init`].
+fn load_public_keys() -> Vec<PublicKey> {
+    let mut keys: Vec<PublicKey> = Vec::new();
 
     let mut add_from_list = |list: &str, source: &str| {
         for b64 in list.split(',') {
@@ -119,8 +134,8 @@ fn get_verifying_keys() -> Vec<VerifyingKey> {
             if b64.is_empty() {
                 continue;
             }
-            if let Some(k) = parse_verifying_key(b64) {
-                keys.push(k);
+            if let Some(pk) = parse_public_key(b64) {
+                keys.push(pk);
             } else {
                 eprintln!(
                     "tango-bridge: ignoring invalid Ed25519 public key in {} \
@@ -144,32 +159,8 @@ fn get_verifying_keys() -> Vec<VerifyingKey> {
     keys
 }
 
-/// Return the base64-encoded strings for every valid public key that is
-/// currently configured (build-time and/or runtime).  The client can compare
-/// this list against its own public key to decide which auth method to use.
-pub fn get_public_keys() -> Vec<String> {
-    let mut result = Vec::new();
-
-    let mut add_from_list = |list: &str| {
-        for b64 in list.split(',') {
-            let b64 = b64.trim();
-            if !b64.is_empty() && parse_verifying_key(b64).is_some() {
-                result.push(b64.to_string());
-            }
-        }
-    };
-
-    if let Some(list) = PUBLIC_KEY_B64 {
-        add_from_list(list);
-    }
-    if let Ok(list) = std::env::var("TANGO_BRIDGE_PUBLIC_KEY") {
-        add_from_list(&list);
-    }
-
-    result
-}
-
-/// Load the PIN from the file, or generate and save a new one.
+/// Load the PIN from the file (or generate and save a new one), and
+/// initialise the list of trusted public keys.
 /// Must be called once at startup before any other auth functions.
 pub fn init() -> std::io::Result<()> {
     let path = pin_file_path();
@@ -194,6 +185,7 @@ pub fn init() -> std::io::Result<()> {
         }
     };
     PIN.get_or_init(|| RwLock::new(pin));
+    PUBLIC_KEYS.get_or_init(load_public_keys);
     Ok(())
 }
 
@@ -221,7 +213,7 @@ pub fn regenerate_pin() -> String {
 /// signature of `challenge`, signed with the private key corresponding to any
 /// of the configured public keys.
 fn verify_token(challenge: &str, token: &str) -> bool {
-    let keys = get_verifying_keys();
+    let keys = public_keys();
     if keys.is_empty() {
         return false;
     }
@@ -239,7 +231,7 @@ fn verify_token(challenge: &str, token: &str) -> bool {
     let signature = Signature::from_bytes(&sig_array);
 
     keys.iter()
-        .any(|key| key.verify_strict(challenge.as_bytes(), &signature).is_ok())
+        .any(|pk| pk.key.verify_strict(challenge.as_bytes(), &signature).is_ok())
 }
 
 /// Verify a PIN value against the stored PIN.
