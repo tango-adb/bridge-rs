@@ -30,6 +30,10 @@ http = "1.2.0"
 tokio-util = "0.7.14"
 tracing-subscriber = "0.3.19"
 tracing = "0.1.41"
+ed25519-dalek = "2"
+base64 = "0.22"
+rand = "0.9"
+arboard = "3"
 
 [build-dependencies]
 winresource = "0.1"

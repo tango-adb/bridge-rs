@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::{
+    collections::HashMap,
     env,
     future::IntoFuture,
     sync::OnceLock,
@@ -13,7 +14,7 @@ use axum::{
     body::Bytes,
     extract::{
         ws::{Message, WebSocket},
-        Request, WebSocketUpgrade,
+        Query, Request, WebSocketUpgrade,
     },
     response::{IntoResponse, Response},
     routing::get,
@@ -28,13 +29,14 @@ use tokio::{
     sync::mpsc::channel,
 };
 use tokio_util::sync::CancellationToken;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
 use tray_icon::{
     menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     TrayIconBuilder, TrayIconEvent,
 };
 
 mod adb;
+mod auth;
 
 fn start_browser() {
     open::that_detached("https://app.tangoapp.dev/?desktop=true").unwrap();
@@ -93,7 +95,35 @@ async fn handle_websocket(ws: WebSocket) {
     );
 }
 
-const ARG_AUTO_RUN: &str = "--auto-run";
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    if !auth::is_authenticated(&params) {
+        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+    }
+    ws.on_upgrade(handle_websocket)
+}
+
+async fn ping_handler() -> impl IntoResponse {
+    let challenge = auth::generate_challenge();
+    let keys_json = auth::public_keys()
+        .iter()
+        .map(|pk| format!("\"{}\"", pk.b64))
+        .collect::<Vec<_>>()
+        .join(",");
+    let body = format!(
+        r#"{{"version":"{}","challenge":"{}","publicKeys":[{}],"challengeTtl":{}}}"#,
+        env!("CARGO_PKG_VERSION"),
+        challenge,
+        keys_json,
+        auth::CHALLENGE_TTL.as_secs(),
+    );
+    (
+        [(http::header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+}
 
 #[cfg(debug_assertions)]
 const PROXY_HOST: &str = "https://tangoapp.dev";
@@ -168,6 +198,8 @@ async fn main() {
         .await
         .unwrap();
 
+    auth::init().unwrap();
+
     #[cfg(debug_assertions)]
     {
         use tracing::Level;
@@ -188,24 +220,15 @@ async fn main() {
         .nest(
             "/bridge",
             Router::new()
-                .route("/ping", get(|| async { env!("CARGO_PKG_VERSION") }))
+                .route("/ping", get(ping_handler))
                 .route(
                     "/",
-                    get(|ws: WebSocketUpgrade| async { ws.on_upgrade(handle_websocket) }),
+                    get(ws_handler),
                 )
                 .route_layer(
                     CorsLayer::new()
                         .allow_methods([Method::GET, Method::POST])
-                        .allow_origin(
-                            [
-                                "http://localhost:3002",
-                                "https://tangoapp.dev",
-                                "https://app.tangoapp.dev",
-                                "https://beta.tangoapp.dev",
-                                "https://tunnel.tangoapp.dev",
-                            ]
-                            .map(|x| x.parse().unwrap()),
-                        )
+                        .allow_origin(Any)
                         .allow_private_network(true),
                 ),
         )
@@ -249,6 +272,10 @@ async fn main() {
         None,
     );
 
+    let menu_pin_display = MenuItem::new(format!("PIN: {}", auth::get_pin()), false, None);
+    let menu_copy_pin = MenuItem::new("Copy PIN", true, None);
+    let menu_regen_pin = MenuItem::new("Regenerate PIN", true, None);
+
     let menu_quit = MenuItem::new("Quit", true, None);
 
     let tray_menu = Menu::new();
@@ -256,6 +283,10 @@ async fn main() {
         .append_items(&[
             &menu_open,
             &menu_auto_run,
+            &PredefinedMenuItem::separator(),
+            &menu_pin_display,
+            &menu_copy_pin,
+            &menu_regen_pin,
             &PredefinedMenuItem::separator(),
             &menu_quit,
         ])
@@ -330,6 +361,19 @@ async fn main() {
                     auto_launch.enable().unwrap();
                 }
                 menu_auto_run.set_checked(auto_launch.is_enabled().unwrap());
+                return;
+            }
+
+            if event.id == menu_copy_pin.id() {
+                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                    let _ = clipboard.set_text(auth::get_pin());
+                }
+                return;
+            }
+
+            if event.id == menu_regen_pin.id() {
+                let pin = auth::regenerate_pin();
+                menu_pin_display.set_text(format!("PIN: {}", pin));
                 return;
             }
 
