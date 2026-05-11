@@ -88,36 +88,42 @@ is disabled and only PIN authentication is active.
 ## 3. Authentication Flow for Public-Key Auth
 
 The public-key flow uses a **challenge–response** scheme to prevent replay attacks.
-Each challenge is single-use and expires after **one hour**.
+Each challenge expires after **one hour** but may be reused for multiple WebSocket
+connections within that window.
 
 ```
-Client                              Tango Bridge
-  │                                      │
-  │  GET /bridge/ping                    │
-  │─────────────────────────────────────>│
-  │                                      │  generate challenge
-  │  { "version": "…", "challenge": "…" }│
-  │<─────────────────────────────────────│
-  │                                      │
-  │  (server-side) sign(challenge)       │
-  │  → token                             │
-  │                                      │
-  │  WebSocket /bridge/?challenge=…      │
-  │              &token=…                │
-  │─────────────────────────────────────>│  verify token & consume challenge
-  │  (upgrade)                           │
-  │<─────────────────────────────────────│
+Client (browser)         Your Server              Tango Bridge
+  │                           │                        │
+  │  GET /bridge/ping         │                        │
+  │───────────────────────────────────────────────────>│
+  │                           │                        │  generate challenge
+  │  { version, challenge, publicKeys }                │
+  │<───────────────────────────────────────────────────│
+  │                           │                        │
+  │  POST /token              │                        │
+  │  { challenge }            │                        │
+  │──────────────────────────>│                        │
+  │                           │  sign(challenge)       │
+  │                           │  → token               │
+  │  { token }                │                        │
+  │<──────────────────────────│                        │
+  │                           │                        │
+  │  WebSocket /bridge/?challenge=…&token=…            │
+  │───────────────────────────────────────────────────>│  verify token
+  │  (upgrade)                                         │
+  │<───────────────────────────────────────────────────│
 ```
 
 1. **Fetch a challenge** from `GET /bridge/ping`:
    ```json
-   { "version": "0.3.0", "challenge": "dGFuZ29icmlkZ2U" }
+   { "version": "0.3.0", "challenge": "dGFuZ29icmlkZ2U", "publicKeys": ["<base64>"] }
    ```
-2. **Sign the challenge** on your server (never in the browser – see §4).
+   Check `publicKeys` to confirm your key is trusted before proceeding.
+2. **Send the challenge to your server** to sign it (private key stays server-side).
 3. **Connect** the WebSocket with both `challenge` and `token` query parameters.
 
-> Challenges expire after one hour. The client must fetch a fresh challenge before
-> reconnecting after expiry.
+> Challenges expire after one hour. Your application should track when the current
+> challenge was obtained and request a fresh one before expiry (e.g. every 55 minutes).
 
 ---
 
@@ -149,17 +155,18 @@ function generateToken(challenge) {
   return sign.sign(privateKeyPem).toString("base64url");
 }
 
-const server = createServer(async (req, res) => {
+const server = createServer((req, res) => {
   const url = new URL(req.url, "http://localhost");
 
-  if (url.pathname === "/token") {
-    // 1. Fetch a challenge from Tango Bridge
-    const pingRes = await fetch("http://localhost:15037/bridge/ping");
-    const { challenge } = await pingRes.json();
-
-    // 2. Sign it and return both values to the browser
-    res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ challenge, token: generateToken(challenge) }));
+  if (url.pathname === "/token" && req.method === "POST") {
+    // The browser sends the challenge it obtained from /bridge/ping
+    let body = "";
+    req.on("data", (chunk) => { body += chunk; });
+    req.on("end", () => {
+      const { challenge } = JSON.parse(body);
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ token: generateToken(challenge) }));
+    });
   } else {
     res.writeHead(404);
     res.end();
@@ -201,12 +208,10 @@ function toBase64Url(buf: ArrayBuffer): string {
     .replace(/=+$/, "");
 }
 
-export async function GET() {
-  // 1. Fetch a challenge from Tango Bridge
-  const pingRes = await fetch("http://localhost:15037/bridge/ping");
-  const { challenge } = await pingRes.json();
+// The browser POSTs the challenge it obtained from /bridge/ping
+export async function POST(request: Request) {
+  const { challenge } = await request.json();
 
-  // 2. Sign the challenge string (UTF-8)
   const key = await getPrivateKey();
   const sig = await crypto.subtle.sign(
     "Ed25519",
@@ -214,8 +219,7 @@ export async function GET() {
     new TextEncoder().encode(challenge),
   );
 
-  // 3. Return both values to the browser
-  return NextResponse.json({ challenge, token: toBase64Url(sig) });
+  return NextResponse.json({ token: toBase64Url(sig) });
 }
 ```
 
@@ -228,17 +232,39 @@ as query string parameters on the WebSocket URL.
 
 ### Connection with a signature token
 
-The client first fetches a `challenge` + `token` pair from your server-side API, then
-opens the WebSocket:
+The browser fetches a challenge from Tango Bridge, sends it to your backend to sign,
+then opens the WebSocket. The challenge is reusable for the full hour, so cache it
+and refresh proactively (e.g. every 55 minutes).
 
 ```js
-async function connectWithToken() {
-  // 1. Fetch a challenge and its signature from your backend
-  //    (the backend calls /bridge/ping and signs the challenge server-side)
-  const res = await fetch("https://your-server.example.com/token");
-  const { challenge, token } = await res.json();
+let authCache = null; // { challenge, token, expiresAt }
 
-  // 2. Open the WebSocket connection to Tango Bridge
+async function getAuth() {
+  const now = Date.now();
+  // Refresh 5 minutes before the 1-hour challenge expires
+  if (authCache && authCache.expiresAt - now > 5 * 60 * 1000) {
+    return authCache;
+  }
+
+  // 1. Fetch a challenge from Tango Bridge
+  const pingRes = await fetch("http://localhost:15037/bridge/ping");
+  const { challenge } = await pingRes.json();
+
+  // 2. Ask your backend to sign it (private key never leaves the server)
+  const tokenRes = await fetch("https://your-server.example.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ challenge }),
+  });
+  const { token } = await tokenRes.json();
+
+  authCache = { challenge, token, expiresAt: now + 60 * 60 * 1000 };
+  return authCache;
+}
+
+async function connectWithToken() {
+  const { challenge, token } = await getAuth();
+
   const ws = new WebSocket(
     `ws://localhost:15037/bridge/?challenge=${encodeURIComponent(challenge)}&token=${encodeURIComponent(token)}`
   );
@@ -264,12 +290,31 @@ async function connectWithToken() {
 
 ### Connection with a PIN
 
-Display the PIN to the user (they read it from the Tango Bridge tray menu) and pass it
-directly:
+The user reads the PIN from the Tango Bridge tray icon menu and enters it in your
+Web app. Check that Tango Bridge is running first by calling `/bridge/ping`.
 
 ```js
-function connectWithPin(pin) {
-  const ws = new WebSocket(`ws://localhost:15037/bridge/?pin=${pin}`);
+async function connectWithPin() {
+  // 1. Check that Tango Bridge is running
+  let bridgeRunning = false;
+  try {
+    const res = await fetch("http://localhost:15037/bridge/ping");
+    bridgeRunning = res.ok;
+  } catch (_) {
+    // Bridge not reachable
+  }
+
+  if (!bridgeRunning) {
+    alert("Tango Bridge is not running. Please start it and try again.");
+    return null;
+  }
+
+  // 2. Prompt the user to enter the PIN shown in the tray icon menu
+  const pin = prompt("Enter the PIN shown in the Tango Bridge tray menu:");
+  if (!pin) return null;
+
+  // 3. Open the WebSocket connection
+  const ws = new WebSocket(`ws://localhost:15037/bridge/?pin=${encodeURIComponent(pin)}`);
 
   ws.binaryType = "arraybuffer";
 
@@ -316,10 +361,15 @@ function handleAdbData(data /* Uint8Array */) {
 `GET http://localhost:15037/bridge/ping` — returns:
 
 ```json
-{ "version": "0.3.0", "challenge": "<22-char URL-safe base64>" }
+{
+  "version": "0.3.0",
+  "challenge": "<22-char URL-safe base64>",
+  "publicKeys": ["<base64-key1>", "<base64-key2>"]
+}
 ```
 
-The challenge is valid for **one hour** and can only be used **once**.
+- `challenge` is valid for **one hour** and may be reused for multiple connections.
+- `publicKeys` lists the currently trusted public keys (empty array when no keys are configured).
 
 ### WebSocket query parameters
 

@@ -107,10 +107,17 @@ async fn ws_handler(
 
 async fn ping_handler() -> impl IntoResponse {
     let challenge = auth::generate_challenge();
+    let public_keys = auth::get_public_keys();
+    let keys_json = public_keys
+        .iter()
+        .map(|k| format!("\"{}\"", k))
+        .collect::<Vec<_>>()
+        .join(",");
     let body = format!(
-        r#"{{"version":"{}","challenge":"{}"}}"#,
+        r#"{{"version":"{}","challenge":"{}","publicKeys":[{}]}}"#,
         env!("CARGO_PKG_VERSION"),
         challenge,
+        keys_json,
     );
     (
         [(http::header::CONTENT_TYPE, "application/json")],
